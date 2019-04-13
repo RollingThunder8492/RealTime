@@ -12,6 +12,34 @@
 
 #pragma region RealTimeEditing command
 
+class CRhinoGetTranslationPoint : public CRhinoGetXform
+{
+public:
+	CRhinoGetTranslationPoint() = default;
+	~CRhinoGetTranslationPoint() = default;
+	BOOL CalculateTransform(CRhinoViewport& vp, const ON_3dPoint& pt, ON_Xform& xform);
+	ON_3dVector GetDir();
+
+private:
+	ON_3dVector dir;
+};
+
+BOOL CRhinoGetTranslationPoint::CalculateTransform(CRhinoViewport& vp, const ON_3dPoint& pt, ON_Xform& xform)
+{
+	UNREFERENCED_PARAMETER(vp);
+	dir = pt - m_basepoint;
+	if (dir.IsTiny())
+		xform = ON_Xform::IdentityTransformation;
+	else
+		xform = ON_Xform::TranslationTransformation(dir);
+	return (xform.IsValid()) ? TRUE : FALSE;
+}
+
+ON_3dVector CRhinoGetTranslationPoint::GetDir()
+{
+	return dir;
+}
+
 // Do NOT put the definition of class CCommandRealTimeEditing in a header
 // file. There is only ONE instance of a CCommandRealTimeEditing class
 // and that instance is the static theRealTimeEditingCommand that appears
@@ -69,13 +97,78 @@ CRhinoCommand::result CCommandRealTimeEditing::RunCommand(const CRhinoCommandCon
   // Rhino command that display a dialog box interface should also support
   // a command-line, or scriptable interface.
 
-  ON_wString str;
-  str.Format(L"The \"%s\" command is under construction.\n", EnglishCommandName());
-  const wchar_t* pszStr = static_cast<const wchar_t*>(str);
-  if (context.IsInteractive())
-    RhinoMessageBox(pszStr, RealTimeEditingPlugIn().PlugInName(), MB_OK);
-  else
-    RhinoApp().Print(pszStr);
+	//select point on mesh that we want to update
+	CRhinoGetObject gv;
+	gv.SetCommandPrompt(L"Select Mesh Vertex to Move");
+	gv.SetGeometryFilter(CRhinoObject::meshvertex_filter);
+	gv.GetObjects(1, 1);
+	if (gv.CommandResult() != CRhinoCommand::success)
+		return gv.CommandResult();
+
+	//Extract vertex and mesh data
+	CRhinoObjRef obj_ref = gv.Object(0);
+	const CRhinoObject* obj = obj_ref.Object();
+	const ON_Mesh* mesh = obj_ref.Mesh();
+	int vertex_index = obj_ref.GeometryComponentIndex().m_index;
+	if (obj == 0 | mesh == 0)
+		return CRhinoCommand::failure;
+
+	//Following gets ask for the translation
+	CRhinoGetPoint gp;
+	gp.SetCommandPrompt(L"Point to move from");
+	gp.GetPoint();
+	if (gp.CommandResult() != CRhinoCommand::success)
+		return gp.CommandResult();
+
+	CRhinoGetTranslationPoint gt;
+	gt.SetCommandPrompt(L"Point to move to");
+	gt.SetBasePoint(gp.Point());
+	gt.DrawLineFromPoint(gp.Point(), TRUE);
+	gt.AppendObjects(gv);
+	gt.GetXform();
+	if (gt.CommandResult() != CRhinoCommand::success)
+		return gp.CommandResult();
+
+	CRhinoView* view = gt.View();
+	if (0 == view)
+		return CRhinoCommand::failure;
+
+	ON_Xform xform;
+	ON_Mesh copied_mesh(*mesh);
+	if (gt.CalculateTransform(view->ActiveViewport(), gt.Point(), xform))
+	{
+		copied_mesh.SetVertex(vertex_index, gt.GetDir() + mesh->m_V[vertex_index]);
+
+		//Need to invalidate things so they may be recalculated
+		copied_mesh.InvalidateVertexBoundingBox();
+		copied_mesh.InvalidateVertexNormalBoundingBox();
+		copied_mesh.InvalidateCurvatureStats();
+		copied_mesh.m_FN.SetCount(0);
+		copied_mesh.m_N.SetCount(0);
+		copied_mesh.ComputeFaceNormals();
+		copied_mesh.ComputeVertexNormals();
+		copied_mesh.SetClosed(-1);
+
+		if (copied_mesh.IsValid())
+		{
+			context.m_doc.ReplaceObject(CRhinoObjRef(obj), copied_mesh);
+			context.m_doc.Redraw();
+		}
+	}
+
+	/*
+	if (gt.CalculateTransform(view->ActiveViewport(), gt.Point(), xform))
+	{
+		for (int i = 0; i < gv.ObjectCount(); i++)
+		{
+			CRhinoObjRef obj_ref = gv.Object(i);
+			context.m_doc.TransformObject(obj_ref, xform);
+		}
+		context.m_doc.Redraw();
+	}
+	*/
+
+	
 
   // TODO: Return one of the following values:
   //   CRhinoCommand::success:  The command worked.
